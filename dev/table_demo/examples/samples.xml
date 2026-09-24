@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<records>
+  <record><样品>A</样品><浓度>0.1</浓度><吸光度>0.23</吸光度></record>
+  <record><样品>B</样品><浓度>0.2</浓度><吸光度>0.45</吸光度></record>
+  <record><样品>C</样品><浓度>0.4</浓度><吸光度>0.81</吸光度></record>
+</records>

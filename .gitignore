@@ -3,4 +3,6 @@
 **/.venv/
 chemDb/client/build/
 chemDb/client/dist/
+dev/table_demo/build/
+dev/table_demo/dist/
 chemDb/client/chemdb_demo_key
