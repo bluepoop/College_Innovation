@@ -1,11 +1,6 @@
-__pycache__/
-*.pyc
-*.pyo
-.Python
-*.egg-info/
-dist/
-build/
-.env
-*.log
-runs/
-datasets/
+**/__pycache__/
+*.py[cod]
+**/.venv/
+chemDb/client/build/
+chemDb/client/dist/
+chemDb/client/chemdb_demo_key
