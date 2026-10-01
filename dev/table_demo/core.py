@@ -22,6 +22,58 @@ class Sheet:
     def width(self):
         return len(self.rows[0]) if self.rows else 0
 
+    def set_cell(self, row, column, value):
+        if not 1 <= row <= len(self.rows) or not 1 <= column <= self.width:
+            raise ValueError('单元格编号超出表格边界（从 1 开始）')
+        if not isinstance(value, str):
+            raise ValueError('单元格内容必须是文本')
+        self.rows[row - 1][column - 1] = value
+
+    def resize(self, axis, index, count=1, delete=False):
+        """Insert before index (size+1 appends), or delete a contiguous range."""
+        if axis not in ('row', 'column'):
+            raise ValueError('请选择行或列')
+        size = len(self.rows) if axis == 'row' else self.width
+        if not isinstance(count, int) or count < 1:
+            raise ValueError('数量必须为正整数')
+        if not 1 <= index <= size + (not delete):
+            raise ValueError('行列编号超出表格边界')
+        if delete and (index + count - 1 > size or count >= size):
+            raise ValueError('删除范围超出边界，且至少需保留一行和一列')
+        if axis == 'row':
+            if delete:
+                del self.rows[index - 1:index - 1 + count]
+            else:
+                self.rows[index - 1:index - 1] = [[''] * max(1, self.width) for _ in range(count)]
+        else:
+            if not self.rows:
+                self.rows = [[]]
+            for row in self.rows:
+                if delete:
+                    del row[index - 1:index - 1 + count]
+                else:
+                    row[index - 1:index - 1] = [''] * count
+        labels = {}
+        for (r, c), tags in self.labels.items():
+            position = r if axis == 'row' else c
+            if delete and index <= position < index + count:
+                continue
+            if position >= index:
+                position += -count if delete else count
+            labels[(position, c) if axis == 'row' else (r, position)] = tags
+        self.labels = labels
+
+    def remove_empty(self):
+        """Compact entirely blank rows/columns, retaining surviving cell text."""
+        rows = [r for r, row in enumerate(self.rows, 1) if any(v.strip() for v in row)]
+        columns = [c for c in range(1, self.width + 1)
+                   if any(self.rows[r - 1][c - 1].strip() for r in rows)]
+        self.rows = [[self.rows[r - 1][c - 1] for c in columns] for r in rows]
+        row_map = {old: new for new, old in enumerate(rows, 1)}
+        column_map = {old: new for new, old in enumerate(columns, 1)}
+        self.labels = {(row_map[r], column_map[c]): tags for (r, c), tags in self.labels.items()
+                       if r in row_map and c in column_map}
+
     def annotate(self, axis, index, start, end, mode, text='', first='1', step='1', suffix='', last=None):
         if axis not in ('row', 'column'):
             raise ValueError('请选择行或列')
@@ -118,6 +170,8 @@ def load_tables(filename):
         sheets = _load_xml(path)
     else:
         raise ValueError('支持 xlsx、xls、csv、tsv、txt、xml')
+    for sheet in sheets:
+        sheet.remove_empty()
     sheets = [sheet for sheet in sheets if sheet.rows and sheet.width]
     if not sheets:
         raise ValueError('文件中没有可读取的表格')

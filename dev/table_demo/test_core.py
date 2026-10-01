@@ -6,6 +6,59 @@ from core import Sheet, export_tables, load_project, load_tables, make_labels, s
 
 
 class TableTests(unittest.TestCase):
+    def test_resize_and_edit_keep_labels_attached(self):
+        sheet = Sheet('测试', [['a', 'b'], ['c', 'd']], {(1, 1): ['A'], (2, 2): ['D']})
+        sheet.resize('row', 2, 2)
+        sheet.resize('column', 1)
+        self.assertEqual(sheet.rows, [['', 'a', 'b'], ['', '', ''], ['', '', ''], ['', 'c', 'd']])
+        self.assertEqual(sheet.labels, {(1, 2): ['A'], (4, 3): ['D']})
+        sheet.set_cell(4, 3, '新值')
+        self.assertEqual(sheet.labels[4, 3], ['D'])
+        sheet.resize('row', 1, 2, delete=True)
+        sheet.resize('column', 2, delete=True)
+        self.assertEqual(sheet.rows, [['', ''], ['', '新值']])
+        self.assertEqual(sheet.labels, {(2, 2): ['D']})
+        sheet.resize('row', 3)
+        sheet.resize('column', 3, 2)
+        self.assertEqual((len(sheet.rows), sheet.width), (3, 4))
+
+    def test_invalid_edits_do_not_mutate(self):
+        import copy
+        sheet = Sheet('测试', [['a', 'b'], ['c', 'd']], {(2, 2): ['标签']})
+        before = copy.deepcopy(sheet)
+        for axis, index, count, delete in [('row', 0, 1, False), ('column', 4, 1, False),
+                                           ('row', 1, 0, False), ('row', 1, 2, True),
+                                           ('column', 2, 2, True), ('bad', 1, 1, False)]:
+            with self.assertRaises(ValueError):
+                sheet.resize(axis, index, count, delete)
+            self.assertEqual(sheet, before)
+        with self.assertRaises(ValueError):
+            sheet.set_cell(0, 1, 'bad')
+        self.assertEqual(sheet, before)
+
+    def test_import_removes_all_blank_rows_and_columns(self):
+        from openpyxl import Workbook
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'a.csv').write_text(', , ,\n, A,,0\n,,,\n, B,,2\n,,,\n', encoding='utf-8')
+            expected = [[' A', '0'], [' B', '2']]
+            self.assertEqual(load_tables(path / 'a.csv')[0].rows, expected)
+            workbook = Workbook()
+            for row in [[None, ' ', None], [None, ' A', None, 0], [], [None, ' B', None, 2]]:
+                workbook.active.append(row)
+            workbook.create_sheet('空表').append([' ', None])
+            workbook.save(path / 'a.xlsx')
+            workbook.close()
+            sheets = load_tables(path / 'a.xlsx')
+            self.assertEqual(len(sheets), 1)
+            self.assertEqual(sheets[0].rows, expected)
+            (path / 'empty.csv').write_text(' ,\n,\n', encoding='utf-8')
+            with self.assertRaises(ValueError):
+                load_tables(path / 'empty.csv')
+            sheet = Sheet('保留空行列', [['a', ''], ['', '']])
+            save_project(path / 'p.json', [sheet])
+            self.assertEqual(load_project(path / 'p.json'), [sheet])
+
     def test_export(self):
         from openpyxl import load_workbook
         sheet = Sheet('实验', [['A,B', '=1+1']])
@@ -66,7 +119,7 @@ class TableTests(unittest.TestCase):
             (path / 'a.xml').write_text('<records><record><name>A</name><value>1</value></record><record><name>B</name></record></records>', encoding='utf-8')
             self.assertEqual(load_tables(path / 'a.xml')[0].rows, [['name', 'value'], ['A', '1'], ['B', '']])
             (path / 'a.xml').write_text('<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="Test"><Table><Row ss:Index="2"><Cell ss:Index="3"><Data ss:Type="String">X</Data></Cell></Row></Table></Worksheet></Workbook>', encoding='utf-8')
-            self.assertEqual(load_tables(path / 'a.xml')[0].rows, [['', '', ''], ['', '', 'X']])
+            self.assertEqual(load_tables(path / 'a.xml')[0].rows, [['X']])
             workbook = Workbook()
             workbook.active.append(['样品', 1])
             workbook.create_sheet('第二张').append(['=1+1'])

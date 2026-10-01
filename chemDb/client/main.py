@@ -35,6 +35,7 @@ from PIL import Image, ImageTk
 
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
+TEXT_ATTACHMENT_EXTS = (".csv", ".tsv", ".xlsx", ".xls", ".txt", ".md", ".json", ".docx", ".pdf")
 FONT_FAMILY = "Microsoft YaHei UI"
 MIN_FONT_SCALE = 0.9
 MAX_FONT_SCALE = 1.4
@@ -527,6 +528,7 @@ class ChemDBApp(tk.Tk):
         self._relations: list[Relation] = []
         self._keyword_rules: list[KeywordRule] = load_keyword_rules()
         self._attachment_text_cache: dict[int, str] = {}
+        self._attachment_paste_cache: dict[int, str] = {}
         self._attachment_parse_errors: dict[int, str] = {}
         self._graph_job: Optional[str] = None
         self._relation_analysis_job: Optional[str] = None
@@ -534,6 +536,9 @@ class ChemDBApp(tk.Tk):
         self._graph_pan_x = 0.0
         self._graph_pan_y = 0.0
         self._graph_drag_anchor: Optional[tuple[int, int]] = None
+        self._graph_drag_node: Optional[str] = None
+        self._graph_node_offsets: dict[str, tuple[float, float]] = {}
+        self._graph_node_tag_map: dict[str, str] = {}
         self._restoring_selection = False
 
         self.search_var = tk.StringVar()
@@ -911,6 +916,7 @@ class ChemDBApp(tk.Tk):
         tools = ttk.Frame(area, style="Surface.TFrame")
         tools.grid(row=0, column=1, sticky="e", pady=(0, 8))
         ttk.Button(tools, text="添加", style="Ghost.TButton", command=self._add_attachments).pack(side="left")
+        ttk.Button(tools, text="识别文字", style="Ghost.TButton", command=self._extract_selected_attachment_text).pack(side="left")
         ttk.Button(tools, text="下载", style="Ghost.TButton", command=self._download).pack(side="left")
         ttk.Button(tools, text="删除", style="Danger.TButton", command=self._delete_attachment).pack(side="left", padx=(5, 0))
 
@@ -981,7 +987,12 @@ class ChemDBApp(tk.Tk):
         footer = ttk.Frame(self.mindmap_panel, style="Surface.TFrame", padding=(14, 8, 14, 12))
         footer.grid(row=2, column=0, sticky="ew")
         ttk.Label(footer, textvariable=self.graph_status_var, style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(footer, text="滚轮调整间距 · 按住鼠标左键拖动画布", style="Muted.TLabel").pack(anchor="w", pady=(3, 0))
+        legend = ttk.Frame(footer, style="Surface.TFrame")
+        legend.pack(anchor="w", pady=(3, 0))
+        tk.Label(legend, text="● 核心（金边）", bg=C.surface, fg=C.primary, font=self._font(9.5, "bold")).pack(side="left")
+        tk.Label(legend, text="● 重要", bg=C.surface, fg=C.warning, font=self._font(9.5, "bold")).pack(side="left", padx=(10, 0))
+        tk.Label(legend, text="● 普通", bg=C.surface, fg=C.text_muted, font=self._font(9.5)).pack(side="left", padx=(10, 0))
+        ttk.Label(footer, text="拖动圆片可调整单个节点 · 拖动空白处可移动整张图 · 滚轮调整间距", style="Muted.TLabel").pack(anchor="w", pady=(3, 0))
 
     @staticmethod
     def _normalize_chemical_notation(value: str) -> str:
@@ -1434,6 +1445,18 @@ class ChemDBApp(tk.Tk):
         label = re.sub(r"\s+", "", value).strip("，。；;、:：")
         return RELATION_LABEL_ALIASES.get(label, label)
 
+    @staticmethod
+    def _concept_priority_map(keyword_rules: Optional[list[KeywordRule]]) -> dict[str, int]:
+        priorities: dict[str, int] = {}
+        for rule in keyword_rules or []:
+            if not rule.enabled or rule.kind != "concept":
+                continue
+            for value in (rule.term, rule.display_label):
+                key = re.sub(r"\s+", " ", value).strip().casefold()
+                if key:
+                    priorities[key] = max(priorities.get(key, 1), rule.importance)
+        return priorities
+
     @classmethod
     def _combine_relation_label(cls, first: str, second: str) -> str:
         first = cls._normalize_relation_label(first)
@@ -1450,7 +1473,6 @@ class ChemDBApp(tk.Tk):
         alias_map = dict(RELATION_LABEL_ALIASES)
         relation_importance: dict[str, int] = {}
         concept_aliases: dict[str, str] = {}
-        concept_importance: dict[str, int] = {}
         for rule in keyword_rules or []:
             if not rule.enabled:
                 continue
@@ -1463,9 +1485,6 @@ class ChemDBApp(tk.Tk):
                 )
             else:
                 concept_aliases[rule.term] = rule.display_label
-                concept_importance[rule.display_label.casefold()] = max(
-                    rule.importance, concept_importance.get(rule.display_label.casefold(), 1)
-                )
         relation_words = tuple(sorted(alias_map, key=len, reverse=True))
         relation_pattern = "|".join(map(re.escape, relation_words))
         entity_char = r"[A-Za-z0-9α-ωΑ-Ω\u4e00-\u9fff\u2070-\u209f¹²³·（）()\-⁺⁻₊₋]"
@@ -1537,11 +1556,7 @@ class ChemDBApp(tk.Tk):
             if key in seen:
                 return
             seen.add(key)
-            importance = max(
-                relation_importance.get(label.casefold(), 1),
-                concept_importance.get(source.casefold(), 1),
-                concept_importance.get(target.casefold(), 1),
-            )
+            importance = relation_importance.get(label.casefold(), 1)
             relations.append(Relation(source, target, label, entry_id, importance))
 
         for entry in entries:
@@ -1705,7 +1720,15 @@ class ChemDBApp(tk.Tk):
         if not self.current:
             return "break"
         self._graph_drag_anchor = (event.x, event.y)
-        self.mindmap_canvas.configure(cursor="fleur")
+        self._graph_drag_node = None
+        for item_id in reversed(self.mindmap_canvas.find_overlapping(event.x - 2, event.y - 2, event.x + 2, event.y + 2)):
+            for tag in self.mindmap_canvas.gettags(item_id):
+                if tag in self._graph_node_tag_map:
+                    self._graph_drag_node = self._graph_node_tag_map[tag]
+                    break
+            if self._graph_drag_node:
+                break
+        self.mindmap_canvas.configure(cursor="hand2" if self._graph_drag_node else "fleur")
         return "break"
 
     def _on_graph_drag_move(self, event: tk.Event) -> str:
@@ -1714,14 +1737,20 @@ class ChemDBApp(tk.Tk):
         old_x, old_y = self._graph_drag_anchor
         dx, dy = event.x - old_x, event.y - old_y
         if dx or dy:
-            self._graph_pan_x += dx
-            self._graph_pan_y += dy
-            self.mindmap_canvas.move("all", dx, dy)
+            if self._graph_drag_node:
+                old_offset = self._graph_node_offsets.get(self._graph_drag_node, (0.0, 0.0))
+                self._graph_node_offsets[self._graph_drag_node] = (old_offset[0] + dx, old_offset[1] + dy)
+                self._draw_relation_graph()
+            else:
+                self._graph_pan_x += dx
+                self._graph_pan_y += dy
+                self.mindmap_canvas.move("all", dx, dy)
             self._graph_drag_anchor = (event.x, event.y)
         return "break"
 
     def _on_graph_drag_end(self, _event: tk.Event) -> str:
         self._graph_drag_anchor = None
+        self._graph_drag_node = None
         self.mindmap_canvas.configure(cursor="")
         return "break"
 
@@ -1730,6 +1759,8 @@ class ChemDBApp(tk.Tk):
         self._graph_pan_x = 0.0
         self._graph_pan_y = 0.0
         self._graph_drag_anchor = None
+        self._graph_drag_node = None
+        self._graph_node_offsets.clear()
         if redraw and hasattr(self, "mindmap_canvas"):
             self._draw_relation_graph()
         return "break"
@@ -1749,10 +1780,63 @@ class ChemDBApp(tk.Tk):
             for node, (x, y) in positions.items()
         }
 
+    @staticmethod
+    def _apply_node_offsets(
+        positions: dict[str, tuple[float, float]],
+        offsets: dict[str, tuple[float, float]],
+    ) -> dict[str, tuple[float, float]]:
+        return {
+            node: (x + offsets.get(node, (0.0, 0.0))[0], y + offsets.get(node, (0.0, 0.0))[1])
+            for node, (x, y) in positions.items()
+        }
+
+    @staticmethod
+    def _layout_priority_nodes(
+        core_nodes: list[str],
+        outer_nodes: list[str],
+        width: float,
+        height: float,
+        node_radius: float,
+    ) -> dict[str, tuple[float, float]]:
+        positions: dict[str, tuple[float, float]] = {}
+        cx, cy = width / 2, height / 2
+        remaining_core = list(core_nodes)
+        max_core_radius = 0.0
+        if len(remaining_core) == 1:
+            positions[remaining_core[0]] = (cx, cy)
+            remaining_core.clear()
+        elif len(remaining_core) == 2:
+            gap = max(node_radius * 1.65, min(width, height) * 0.105)
+            positions[remaining_core[0]] = (cx - gap, cy)
+            positions[remaining_core[1]] = (cx + gap, cy)
+            max_core_radius = gap
+            remaining_core.clear()
+        ring_index = 0
+        while remaining_core:
+            ring_index += 1
+            capacity = 6 if ring_index == 1 else 10
+            ring_nodes = remaining_core[:capacity]
+            del remaining_core[:capacity]
+            ring_radius = max(
+                node_radius * (1.9 + 2.15 * (ring_index - 1)),
+                min(width, height) * (0.13 + 0.12 * (ring_index - 1)),
+            )
+            max_core_radius = max(max_core_radius, ring_radius)
+            for index, node in enumerate(ring_nodes):
+                angle = -math.pi / 2 + (2 * math.pi * index / len(ring_nodes))
+                positions[node] = (cx + ring_radius * math.cos(angle), cy + ring_radius * math.sin(angle))
+        if outer_nodes:
+            outer_radius = max(min(width, height) * 0.37, max_core_radius + node_radius * 3.0)
+            for index, node in enumerate(outer_nodes):
+                angle = -math.pi / 2 + (2 * math.pi * index / len(outer_nodes))
+                positions[node] = (cx + outer_radius * math.cos(angle), cy + outer_radius * math.sin(angle))
+        return positions
+
     def _draw_relation_graph(self) -> None:
         self._graph_job = None
         canvas = self.mindmap_canvas
         canvas.delete("all")
+        self._graph_node_tag_map.clear()
         width = max(10, canvas.winfo_width())
         height = max(10, canvas.winfo_height())
         if not self.current:
@@ -1769,19 +1853,31 @@ class ChemDBApp(tk.Tk):
 
         selected_nodes = [node for relation in selected_relations for node in (relation.source, relation.target)]
         degree: dict[str, int] = {}
-        node_importance: dict[str, int] = {}
-        for relation in selected_relations:
-            node_importance[relation.source] = max(node_importance.get(relation.source, 1), relation.importance)
-            node_importance[relation.target] = max(node_importance.get(relation.target, 1), relation.importance)
+        concept_priorities = self._concept_priority_map(self._keyword_rules)
+
+        def node_priority(node: str) -> int:
+            key = re.sub(r"\s+", " ", node).strip().casefold()
+            return concept_priorities.get(key, 1)
+
         for node in selected_nodes:
             degree[node] = degree.get(node, 0) + 1
-        center = max(degree, key=lambda node: (node_importance.get(node, 1), degree[node], -selected_nodes.index(node)))
+        center = max(degree, key=lambda node: (node_priority(node), degree[node], -selected_nodes.index(node)))
 
         nodes: list[str] = [center]
         for relation in selected_relations:
             for node in (relation.source, relation.target):
                 if node not in nodes:
                     nodes.append(node)
+        linked_core_nodes: list[str] = []
+        for relation in self._relations:
+            candidate = ""
+            if relation.source in nodes and relation.target not in nodes:
+                candidate = relation.target
+            elif relation.target in nodes and relation.source not in nodes:
+                candidate = relation.source
+            if candidate and node_priority(candidate) >= 3 and candidate not in linked_core_nodes:
+                linked_core_nodes.append(candidate)
+        nodes.extend(linked_core_nodes)
         for relation in self._relations:
             if len(nodes) >= 9:
                 break
@@ -1825,8 +1921,15 @@ class ChemDBApp(tk.Tk):
             components.append(component)
 
         positions: dict[str, tuple[float, float]] = {}
-        primary_node = center if len(components) == 1 else ""
-        if len(components) == 1:
+        core_nodes = [node for node in nodes if node_priority(node) >= 3]
+        important_nodes = [node for node in nodes if node_priority(node) == 2]
+        priority_layout = bool(core_nodes)
+        multi_core_layout = len(core_nodes) >= 2
+        primary_node = core_nodes[0] if len(core_nodes) == 1 else center if len(components) == 1 and not core_nodes else ""
+        if priority_layout:
+            outer_nodes = [node for node in nodes if node not in core_nodes]
+            positions = self._layout_priority_nodes(core_nodes, outer_nodes, width, height, node_radius)
+        elif len(components) == 1:
             cx, cy = width / 2, height / 2
             radius = max(82, min(width, height) * (0.29 if len(nodes) <= 6 else 0.34))
             positions[center] = (cx, cy)
@@ -1865,10 +1968,9 @@ class ChemDBApp(tk.Tk):
                     )
 
         positions = self._apply_graph_view(positions, width, height)
+        positions = self._apply_node_offsets(positions, self._graph_node_offsets)
 
         for relation in edges:
-            node_importance[relation.source] = max(node_importance.get(relation.source, 1), relation.importance)
-            node_importance[relation.target] = max(node_importance.get(relation.target, 1), relation.importance)
             x1, y1 = positions[relation.source]
             x2, y2 = positions[relation.target]
             dx, dy = x2 - x1, y2 - y1
@@ -1900,13 +2002,17 @@ class ChemDBApp(tk.Tk):
                 canvas.tag_lower(background, label)
 
         current_entities = set(selected_nodes)
-        for node in reversed(nodes):
+        for node_index, node in enumerate(reversed(nodes)):
             x, y = positions[node]
             is_center = node == primary_node
             is_current = node in current_entities
-            importance = node_importance.get(node, 1)
+            importance = node_priority(node)
             node_kind = self._relation_node_kind(node)
-            if is_center:
+            if importance >= 3:
+                fill, outline, text_color = C.primary, C.warning, "white"
+            elif importance == 2:
+                fill, outline, text_color = C.warning_soft, C.warning, C.navy
+            elif is_center:
                 fill, outline, text_color = C.primary, C.primary, "white"
             elif node_kind == "experiment":
                 fill, outline, text_color = C.success_soft, C.success, C.navy
@@ -1916,6 +2022,8 @@ class ChemDBApp(tk.Tk):
                 fill = C.primary_soft if is_current else C.surface_alt
                 outline = C.primary if is_current else C.border_strong
                 text_color = C.navy
+            node_tag = f"graph_node_{node_index}"
+            self._graph_node_tag_map[node_tag] = node
             canvas.create_oval(
                 x - node_radius,
                 y - node_radius,
@@ -1923,25 +2031,32 @@ class ChemDBApp(tk.Tk):
                 y + node_radius,
                 fill=fill,
                 outline=outline,
-                width=self._px(max(2 if is_current else 1, importance)),
+                width=self._px(4 if importance >= 3 else 3 if importance == 2 else 2 if is_current else 1),
+                tags=("graph_node", node_tag),
             )
             canvas.create_text(
                 x,
                 y,
                 text=self._display_node_label(node),
                 fill=text_color,
-                font=self._font(10, "bold" if is_current else "normal"),
+                font=self._font(10, "bold" if is_current or importance >= 2 else "normal"),
                 width=max(40, round(node_radius * 1.65)),
                 justify="center",
+                tags=("graph_node", node_tag),
             )
 
-        if len(components) == 1:
+        priority_status = f" · 核心 {len(core_nodes)} · 重要 {len(important_nodes)}" if core_nodes or important_nodes else ""
+        if multi_core_layout:
             self.graph_status_var.set(
-                f"实时预览 · 以“{center}”为中心 · {len(nodes)} 个节点 · {len(edges)} 条关系 · 间距{round(self._graph_spacing * 100)}%"
+                f"实时预览 · {len(core_nodes)} 个核心节点居中 · {len(nodes)} 个节点 · {len(edges)} 条关系{priority_status} · 间距{round(self._graph_spacing * 100)}%"
+            )
+        elif len(components) == 1:
+            self.graph_status_var.set(
+                f"实时预览 · 以“{center}”为中心 · {len(nodes)} 个节点 · {len(edges)} 条关系{priority_status} · 间距{round(self._graph_spacing * 100)}%"
             )
         else:
             self.graph_status_var.set(
-                f"实时预览 · {len(components)} 组关系 · {len(nodes)} 个节点 · {len(edges)} 条连线 · 间距{round(self._graph_spacing * 100)}%"
+                f"实时预览 · {len(components)} 组关系 · {len(nodes)} 个节点 · {len(edges)} 条连线{priority_status} · 间距{round(self._graph_spacing * 100)}%"
             )
 
     def _draw_graph_empty(self, title: str, subtitle: str) -> None:
@@ -2132,7 +2247,7 @@ class ChemDBApp(tk.Tk):
     def _finish_restoring_selection(self) -> None:
         self._restoring_selection = False
 
-    def _show_detail(self, entry: dict[str, Any]) -> None:
+    def _show_detail(self, entry: dict[str, Any], paste_attachment_ids: Optional[set[int]] = None) -> None:
         self._updating_editor = True
         previous_id = self.current.get("id") if self.current else None
         self.current = entry
@@ -2163,7 +2278,7 @@ class ChemDBApp(tk.Tk):
         self._photo = None
         self.empty_state.place_forget()
         self._draw_relation_graph()
-        self._load_table_attachments(entry)
+        self._load_text_attachments(entry, paste_attachment_ids)
 
         for item in attachments:
             if item.get("has_thumb"):
@@ -2172,7 +2287,13 @@ class ChemDBApp(tk.Tk):
                 break
 
     @staticmethod
-    def _extract_table_text(filename: str, data: bytes, max_cells: int = 6000, max_chars: int = 160000) -> str:
+    def _extract_table_text(
+        filename: str,
+        data: bytes,
+        max_cells: int = 6000,
+        max_chars: int = 160000,
+        include_relation_sentences: bool = True,
+    ) -> str:
         ext = Path(filename).suffix.lower()
         rows: list[list[str]] = []
         cell_count = 0
@@ -2262,57 +2383,189 @@ class ChemDBApp(tk.Tk):
                     relation_sentences.append(f"{source}与{target}发生{relation}。")
             break
         plain_text = "\n".join(" ".join(row) for row in rows)
-        if relation_sentences:
+        if include_relation_sentences and relation_sentences:
             plain_text += "\n" + "\n".join(relation_sentences)
         return plain_text[:max_chars]
 
-    def _load_table_attachments(self, entry: dict[str, Any]) -> None:
+    @staticmethod
+    def _extract_attachment_text(
+        filename: str,
+        data: bytes,
+        max_chars: int = 160000,
+        for_analysis: bool = True,
+    ) -> str:
+        ext = Path(filename).suffix.lower()
+        if ext in {".csv", ".tsv", ".xlsx", ".xls"}:
+            return ChemDBApp._extract_table_text(
+                filename,
+                data,
+                max_chars=max_chars,
+                include_relation_sentences=for_analysis,
+            )
+        if ext in {".txt", ".md", ".json"}:
+            for encoding in ("utf-8-sig", "gb18030", "utf-16"):
+                try:
+                    return data.decode(encoding)[:max_chars].strip()
+                except UnicodeDecodeError:
+                    continue
+            return data.decode("utf-8", errors="replace")[:max_chars].strip()
+        if ext == ".docx":
+            try:
+                from docx import Document
+            except ImportError as exc:
+                raise RuntimeError("读取 DOCX 需要安装 python-docx") from exc
+            document = Document(io.BytesIO(data))
+            parts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+            for table in document.tables:
+                for row in table.rows:
+                    values = [cell.text.strip() for cell in row.cells]
+                    if any(values):
+                        parts.append(" ".join(values))
+            return "\n".join(parts)[:max_chars]
+        if ext == ".pdf":
+            try:
+                from pypdf import PdfReader
+            except ImportError as exc:
+                raise RuntimeError("读取 PDF 需要安装 pypdf") from exc
+            reader = PdfReader(io.BytesIO(data))
+            parts: list[str] = []
+            current_length = 0
+            for page in reader.pages[:120]:
+                text = (page.extract_text() or "").strip()
+                if not text:
+                    continue
+                parts.append(text)
+                current_length += len(text)
+                if current_length >= max_chars:
+                    break
+            return "\n".join(parts)[:max_chars]
+        return ""
+
+    @staticmethod
+    def _merge_attachment_text(existing: str, sections: list[tuple[str, str]]) -> str:
+        additions = [f"【附件文字：{filename}】\n{text.strip()}" for filename, text in sections if text.strip()]
+        if not additions:
+            return existing
+        base = existing.rstrip()
+        separator = "\n\n" if base else ""
+        return base + separator + "\n\n".join(additions)
+
+    def _load_text_attachments(
+        self,
+        entry: dict[str, Any],
+        paste_attachment_ids: Optional[set[int]] = None,
+        notify_empty: bool = False,
+    ) -> None:
         if not self.client:
             return
+        paste_ids = set(paste_attachment_ids or set())
+        requested_paste_ids = set(paste_ids)
+        attachment_names: dict[int, str] = {}
         pending: list[tuple[int, str]] = []
         for attachment in entry.get("attachments", []) or []:
             filename = str(attachment.get("filename", ""))
-            if Path(filename).suffix.lower() not in {".csv", ".tsv", ".xlsx", ".xls"}:
+            if Path(filename).suffix.lower() not in TEXT_ATTACHMENT_EXTS:
                 continue
             try:
                 attachment_id = int(attachment.get("id"))
             except (TypeError, ValueError):
                 continue
-            if attachment_id not in self._attachment_text_cache and attachment_id not in self._attachment_parse_errors:
+            if notify_empty and paste_ids and attachment_id not in paste_ids:
+                continue
+            attachment_names[attachment_id] = filename
+            needs_analysis = attachment_id not in self._attachment_text_cache
+            needs_paste_text = attachment_id in paste_ids and attachment_id not in self._attachment_paste_cache
+            if (needs_analysis or needs_paste_text) and attachment_id not in self._attachment_parse_errors:
                 pending.append((attachment_id, filename))
-        if not pending:
-            return
         try:
             entry_id = int(entry.get("id"))
         except (TypeError, ValueError):
             return
 
-        def read_tables() -> tuple[dict[int, str], dict[int, str]]:
+        def append_to_editor(available: dict[int, str]) -> int:
+            if not paste_ids or not self.current or int(self.current.get("id", -1)) != entry_id:
+                return 0
+            sections = [
+                (attachment_names[attachment_id], available.get(attachment_id, ""))
+                for attachment_id in attachment_names
+                if attachment_id in paste_ids and available.get(attachment_id, "").strip()
+            ]
+            if not sections:
+                return 0
+            existing = self.body_text.get("1.0", "end-1c")
+            merged = self._merge_attachment_text(existing, sections)
+            trimmed = existing.rstrip()
+            trailing_count = len(existing) - len(trimmed)
+            if trailing_count:
+                self.body_text.delete(f"end-1c-{trailing_count}c", "end-1c")
+            insert_start = self.body_text.index("end-1c")
+            self.body_text.insert(insert_start, merged[len(trimmed) :])
+            insert_end = self.body_text.index("end-1c")
+            for tag in tuple(self._rich_styles):
+                self.body_text.tag_remove(tag, insert_start, insert_end)
+            self.body_text.edit_modified(False)
+            self._on_editor_changed(force=True)
+            return len(sections)
+
+        cached = {
+            attachment_id: self._attachment_paste_cache[attachment_id]
+            for attachment_id in paste_ids
+            if attachment_id in self._attachment_paste_cache
+        }
+        pasted_from_cache = append_to_editor(cached)
+        paste_ids.difference_update(cached.keys())
+        if not pending:
+            if pasted_from_cache:
+                self.status_var.set(f"已把 {pasted_from_cache} 个附件的文字追加到实验内容，请保存记录")
+            elif requested_paste_ids:
+                self.status_var.set("所选附件中没有可提取的文字")
+                if notify_empty:
+                    messagebox.showinfo("没有可提取文字", "所选附件中没有可提取的文字。\n\n扫描图片或扫描版 PDF 需要 OCR 支持。", parent=self)
+            return
+
+        def read_attachments() -> tuple[dict[int, str], dict[int, str], dict[int, str]]:
             extracted: dict[int, str] = {}
+            paste_texts: dict[int, str] = {}
             errors: dict[int, str] = {}
             for attachment_id, filename in pending:
                 try:
                     data = self.client.download_attachment(attachment_id)
                     if len(data) > 25 * 1024 * 1024:
-                        raise ValueError("表格超过 25 MB，已跳过自动分析")
-                    extracted[attachment_id] = self._extract_table_text(filename, data)
+                        raise ValueError("附件超过 25 MB，已跳过自动提取")
+                    analysis_text = self._extract_attachment_text(filename, data, for_analysis=True)
+                    extracted[attachment_id] = analysis_text
+                    if attachment_id in paste_ids:
+                        if Path(filename).suffix.lower() in {".csv", ".tsv", ".xlsx", ".xls"}:
+                            paste_texts[attachment_id] = self._extract_attachment_text(filename, data, for_analysis=False)
+                        else:
+                            paste_texts[attachment_id] = analysis_text
                 except Exception as exc:
                     errors[attachment_id] = str(exc)
-            return extracted, errors
+            return extracted, paste_texts, errors
 
-        def loaded(result: tuple[dict[int, str], dict[int, str]]) -> None:
-            extracted, errors = result
+        def loaded(result: tuple[dict[int, str], dict[int, str], dict[int, str]]) -> None:
+            extracted, paste_texts, errors = result
             self._attachment_text_cache.update(extracted)
+            self._attachment_paste_cache.update(paste_texts)
             self._attachment_parse_errors.update(errors)
             if self.current and int(self.current.get("id", -1)) == entry_id:
+                pasted_count = append_to_editor(paste_texts)
                 self._rebuild_relation_graph()
                 ok_count = sum(1 for value in extracted.values() if value)
-                if ok_count:
-                    self.status_var.set(f"已提取 {ok_count} 个表格附件并更新思维导图")
+                if pasted_count:
+                    self.status_var.set(f"已把 {pasted_count} 个附件的文字追加到实验内容，请保存记录")
+                elif ok_count:
+                    self.status_var.set(f"已提取 {ok_count} 个附件的文字并更新思维导图")
                 elif errors:
-                    self.status_var.set("表格附件未能解析；请检查格式或读取组件")
+                    self.status_var.set("附件未能提取文字；请检查格式或读取组件")
+                    if notify_empty:
+                        messagebox.showwarning("文字识别失败", next(iter(errors.values())), parent=self)
+                elif requested_paste_ids:
+                    self.status_var.set("所选附件中没有可提取的文字")
+                    if notify_empty:
+                        messagebox.showinfo("没有可提取文字", "所选附件中没有可提取的文字。\n\n扫描图片或扫描版 PDF 需要 OCR 支持。", parent=self)
 
-        self._run("读取表格附件", read_tables, loaded)
+        self._run("提取附件文字", read_attachments, loaded)
 
     def _show_empty_state(self, title: str = "选择一条实验记录", subtitle: str = "从左侧打开记录，或新建一条实验记录") -> None:
         self._dirty = False
@@ -2419,6 +2672,13 @@ class ChemDBApp(tk.Tk):
             def created(entry: dict[str, Any]) -> None:
                 dialog.destroy()
                 entry_id = entry.get("id") if isinstance(entry, dict) else None
+                if isinstance(entry, dict) and entry_id is not None:
+                    new_attachment_ids = {
+                        int(item["id"])
+                        for item in entry.get("attachments", []) or []
+                        if item.get("id") is not None
+                    }
+                    self._show_detail(entry, new_attachment_ids)
                 self.refresh(select_id=entry_id)
 
             self._run("新建记录", lambda: self.client.create_entry(text, list(files)), created)
@@ -2471,6 +2731,37 @@ class ChemDBApp(tk.Tk):
                 return item
         return None
 
+    def _extract_selected_attachment_text(self) -> None:
+        item = self._selected_attachment()
+        if not item or not self.current:
+            messagebox.showinfo("选择附件", "请先在附件列表中选择一个文件。", parent=self)
+            return
+        filename = str(item.get("filename", "附件"))
+        if Path(filename).suffix.lower() not in TEXT_ATTACHMENT_EXTS:
+            messagebox.showinfo(
+                "暂不支持此格式",
+                "当前可识别 CSV、TSV、XLSX、XLS、TXT、Markdown、JSON、DOCX 和带文本层的 PDF。\n\n图片及扫描版 PDF 需要 OCR 支持。",
+                parent=self,
+            )
+            return
+        marker = f"【附件文字：{filename}】"
+        existing = self.body_text.get("1.0", "end-1c")
+        if marker in existing and not messagebox.askyesno(
+            "附件文字已存在",
+            f"正文中已经存在“{filename}”的提取内容。\n\n是否再次识别并追加？",
+            parent=self,
+        ):
+            return
+        try:
+            attachment_id = int(item["id"])
+        except (KeyError, TypeError, ValueError):
+            messagebox.showerror("无法识别", "附件 ID 无效。", parent=self)
+            return
+        self._attachment_parse_errors.pop(attachment_id, None)
+        if not self._attachment_paste_cache.get(attachment_id, "").strip():
+            self._attachment_paste_cache.pop(attachment_id, None)
+        self._load_text_attachments(self.current, {attachment_id}, notify_empty=True)
+
     def _add_attachments(self) -> None:
         if not self.current or not self.client:
             return
@@ -2478,13 +2769,26 @@ class ChemDBApp(tk.Tk):
         if not paths:
             return
         entry_id = self.current["id"]
+        old_attachment_ids = {
+            int(item["id"])
+            for item in self.current.get("attachments", []) or []
+            if item.get("id") is not None
+        }
+
+        def show_added_entry(entry: dict[str, Any]) -> None:
+            new_ids = {
+                int(item["id"])
+                for item in entry.get("attachments", []) or []
+                if item.get("id") is not None and int(item["id"]) not in old_attachment_ids
+            }
+            self._show_detail(entry, new_ids)
+            self.refresh(select_id=entry_id)
 
         def added(result: Any) -> None:
             if isinstance(result, dict) and "id" in result:
-                self._show_detail(result)
+                show_added_entry(result)
             else:
-                self._run("刷新记录", lambda: self.client.get_entry(entry_id), self._show_detail)
-            self.refresh(select_id=entry_id)
+                self._run("刷新记录", lambda: self.client.get_entry(entry_id), show_added_entry)
 
         self._run("上传附件", lambda: self.client.add_attachments(entry_id, paths), added)
 

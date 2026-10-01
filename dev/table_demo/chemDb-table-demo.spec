@@ -1,16 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
+
+project_dir = Path(SPECPATH).resolve()
 
 datas = []
 binaries = []
-hiddenimports = ['xlrd', 'defusedxml.ElementTree']
+hiddenimports = ['core', 'xlrd', 'defusedxml.ElementTree']
 tmp_ret = collect_all('openpyxl')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    [str(project_dir / 'main.py')],
+    pathex=[str(project_dir)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

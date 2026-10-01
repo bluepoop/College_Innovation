@@ -1,7 +1,7 @@
 """Standalone Tkinter demo; TableDemo can also be embedded in a Toplevel."""
 import copy
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from core import Sheet, export_tables, load_project, load_tables, save_project
 
@@ -16,13 +16,13 @@ class TableDemo(ttk.Frame):
         self.dirty = False
         bar = ttk.Frame(self)
         bar.pack(fill='x')
-        for title, command in [('导入表格', self.import_file), ('打开标签项目', self.open_project), ('保存标签项目', self.save), ('撤销标签操作', self.undo), ('清空当前表标签', self.clear)]:
+        for title, command in [('导入表格', self.import_file), ('打开标签项目', self.open_project), ('保存标签项目', self.save), ('撤销操作', self.undo), ('清空当前表标签', self.clear)]:
             ttk.Button(bar, text=title, command=command).pack(side='left', padx=3)
         self.sheet_choice = ttk.Combobox(bar, state='readonly', width=18)
         ttk.Button(bar, text='导出表格', command=self.export).pack(side='left', padx=3)
         self.sheet_choice.pack(side='right')
         self.sheet_choice.bind('<<ComboboxSelected>>', lambda e: self.refresh())
-        ttk.Label(self, text='点击每行左侧或每列上方的“＋标签”，选择类型后输入参数。原始内容保留；编号包含表头。').pack(anchor='w', pady=8)
+        ttk.Label(self, text='点击“＋标签”添加标签；双击单元格修改内容。编号从 1 开始，包含表头；导入自动去除空行空列。').pack(anchor='w', pady=8)
         body = ttk.Frame(self)
         body.pack(fill='both', expand=True)
         self.table = tk.Canvas(body, background='white', highlightthickness=0)
@@ -55,7 +55,10 @@ class TableDemo(ttk.Frame):
         self.refresh()
 
     def refresh(self):
+        if self.label_dialog is not None and self.label_dialog.winfo_exists():
+            self.label_dialog.destroy()
         sheet = self.sheet
+        self.detail.set('点击单元格查看完整内容和标签；双击可编辑。')
         for child in self.grid_frame.winfo_children():
             child.destroy()
         for c in range(1, sheet.width + 1):
@@ -66,7 +69,17 @@ class TableDemo(ttk.Frame):
                 content = value + ''.join(f' 【{tag}】' for tag in sheet.labels.get((r, c), []))
                 cell = tk.Label(self.grid_frame, text=content, background='white', foreground='black', width=26, height=2, anchor='w', relief='solid', borderwidth=1)
                 cell.grid(row=r, column=c, sticky='nsew')
-                cell.bind('<Button-1>', lambda e, r=r, c=c: self.detail.set(f'第 {r} 行，第 {c} 列 | 原始内容：{self.sheet.rows[r-1][c-1]} | 标签：' + '、'.join(self.sheet.labels.get((r, c), []))))
+                cell.bind('<Button-1>', lambda e, r=r, c=c: self.select_cell(r, c))
+                cell.bind('<Double-Button-1>', lambda e, r=r, c=c: self.edit_cell(r, c))
+        for axis, size, direction in [('row', len(sheet.rows), '行'), ('column', sheet.width, '列')]:
+            for index in range(1, size + 1):
+                panel = ttk.Frame(self.grid_frame, padding=3)
+                panel.grid(row=index if axis == 'row' else len(sheet.rows) + 1,
+                           column=sheet.width + 1 if axis == 'row' else index, sticky='w')
+                for title, delete in [(f'＋ 增加{direction}', False), (f'－ 删除{direction}', True)]:
+                    ttk.Button(panel, text=title, width=9,
+                               state='disabled' if delete and size == 1 else 'normal',
+                               command=lambda a=axis, i=index, d=delete: self.resize_sheet(a, i, d)).pack(side='left', padx=2)
         self.status.set(f'{sheet.name}：{len(sheet.rows)} 行 × {sheet.width} 列；{len(sheet.labels)} 个单元格有标签' + ('；有未保存修改' if self.dirty else ''))
 
     def open_labels(self, axis, index):
@@ -75,7 +88,37 @@ class TableDemo(ttk.Frame):
         self.label_dialog = LabelDialog(self, axis, index)
 
     def confirm_discard(self):
-        return not self.dirty or messagebox.askyesno('未保存修改', '标签尚未保存，确定放弃这些修改？', parent=self)
+        return not self.dirty or messagebox.askyesno('未保存修改', '表格内容或标签尚未保存，确定放弃这些修改？', parent=self)
+
+    def select_cell(self, row, column):
+        self.detail.set(f'第 {row} 行，第 {column} 列 | 内容：{self.sheet.rows[row-1][column-1]} | 标签：'
+                        + '、'.join(self.sheet.labels.get((row, column), [])))
+
+    def apply_change(self, action):
+        before = copy.deepcopy(self.sheet)
+        action()
+        if self.sheet != before:
+            self.history.append((self.sheet, before))
+            self.dirty = True
+            self.refresh()
+
+    def resize_sheet(self, axis, index, delete=False):
+        try:
+            self.apply_change(lambda: self.sheet.resize(axis, index if delete else index + 1, delete=delete))
+        except ValueError as exc:
+            messagebox.showerror('行列操作失败', str(exc), parent=self)
+
+    def edit_cell(self, row, column):
+        try:
+            if not 1 <= row <= len(self.sheet.rows) or not 1 <= column <= self.sheet.width:
+                raise ValueError('单元格编号超出表格边界（从 1 开始）')
+            value = simpledialog.askstring('修改单元格', f'第 {row} 行，第 {column} 列的新内容（可留空；标签保留）：',
+                                           initialvalue=self.sheet.rows[row - 1][column - 1], parent=self)
+            if value is not None:
+                self.apply_change(lambda: self.sheet.set_cell(row, column, value))
+                self.select_cell(row, column)
+        except ValueError as exc:
+            messagebox.showerror('修改失败', str(exc), parent=self)
 
     def import_file(self):
         if not self.confirm_discard():
@@ -124,16 +167,13 @@ class TableDemo(ttk.Frame):
                 messagebox.showerror('导出失败', str(exc), parent=self)
 
     def clear(self):
-        self.history.append((self.sheet, copy.deepcopy(self.sheet.labels)))
-        self.sheet.labels.clear()
-        self.dirty = True
-        self.refresh()
+        self.apply_change(self.sheet.labels.clear)
 
     def undo(self):
         if self.history:
-            sheet, labels = self.history.pop()
-            sheet.labels = labels
-            self.sheet_choice.current(self.sheets.index(sheet))
+            sheet, before = self.history.pop()
+            sheet.rows, sheet.labels = before.rows, before.labels
+            self.sheet_choice.current(next(i for i, item in enumerate(self.sheets) if item is sheet))
             self.dirty = True
             self.refresh()
 
@@ -243,11 +283,7 @@ class LabelDialog(tk.Toplevel):
             if self.app.sheet is not self.target_sheet:
                 raise ValueError('工作表已切换或重新导入，请关闭此窗口并重新点击目标行/列')
             start, end, values = self.parameters()
-            before = copy.deepcopy(self.app.sheet.labels)
-            self.app.sheet.annotate(self.axis, self.index, start, end, self.mode, **values)
-            self.app.history.append((self.app.sheet, before))
-            self.app.dirty = True
-            self.app.refresh()
+            self.app.apply_change(lambda: self.app.sheet.annotate(self.axis, self.index, start, end, self.mode, **values))
             self.destroy()
         except (ValueError, ArithmeticError) as exc:
             self.preview.set(str(exc))
