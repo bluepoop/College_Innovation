@@ -3,7 +3,10 @@ import copy
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from core import Sheet, export_tables, load_project, load_tables, save_project
+if __package__:
+    from .core import Sheet, export_tables, load_project, load_tables, save_project, make_labels
+else:
+    from core import Sheet, export_tables, load_project, load_tables, save_project, make_labels
 
 
 class TableDemo(ttk.Frame):
@@ -16,11 +19,13 @@ class TableDemo(ttk.Frame):
         self.dirty = False
         bar = ttk.Frame(self)
         bar.pack(fill='x')
-        for title, command in [('导入表格', self.import_file), ('打开标签项目', self.open_project), ('保存标签项目', self.save), ('撤销操作', self.undo), ('清空当前表标签', self.clear)]:
-            ttk.Button(bar, text=title, command=command).pack(side='left', padx=3)
+        commands = [('导入表格', self.import_file), ('打开标签项目', self.open_project), ('保存标签项目', self.save), ('撤销操作', self.undo), ('清空当前表标签', self.clear), ('导出表格', self.export)]
+        for i, (title, command) in enumerate(commands):
+            ttk.Button(bar, text=title, command=command).grid(row=i // 3, column=i % 3, sticky='ew', padx=3, pady=2)
+        for i in range(3):
+            bar.columnconfigure(i, weight=1)
         self.sheet_choice = ttk.Combobox(bar, state='readonly', width=18)
-        ttk.Button(bar, text='导出表格', command=self.export).pack(side='left', padx=3)
-        self.sheet_choice.pack(side='right')
+        self.sheet_choice.grid(row=2, column=0, columnspan=3, sticky='ew', padx=3, pady=2)
         self.sheet_choice.bind('<<ComboboxSelected>>', lambda e: self.refresh())
         ttk.Label(self, text='点击“＋标签”添加标签；双击单元格修改内容。编号从 1 开始，包含表头；导入自动去除空行空列。').pack(anchor='w', pady=8)
         body = ttk.Frame(self)
@@ -270,7 +275,6 @@ class LabelDialog(tk.Toplevel):
 
     def preview_labels(self):
         try:
-            from core import make_labels
             start, end, values = self.parameters()
             tags = make_labels(end - start + 1, self.mode, **values)
             shown = tags if len(tags) <= 6 else tags[:3] + ['…'] + tags[-2:]

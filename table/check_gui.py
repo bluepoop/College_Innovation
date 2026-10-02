@@ -1,4 +1,4 @@
-"""Run manually with a desktop session: python dev/table_demo/check_gui.py."""
+"""Run manually with a desktop session: python table/check_gui.py."""
 import tkinter as tk
 from tkinter import ttk
 from main import TableDemo

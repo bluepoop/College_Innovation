@@ -5,8 +5,8 @@
 在仓库根目录运行：
 
 ```powershell
-python -m pip install -r dev/table_demo/requirements.txt
-python dev/table_demo/main.py
+python -m pip install -r table/requirements.txt
+python table/main.py
 ```
 
 启动时自带一张示例表，也可导入 `examples` 下的文件。
@@ -56,4 +56,4 @@ python dev/table_demo/main.py
 
 当前用于小型表格功能验证，整张表在内存中展示；保留单元格文本，不保留 Excel 样式、合并布局、图表，也不计算公式（XLSX 显示公式文本）。项目保存格式为 JSON，可另行导出 XLSX 或 CSV。
 
-运行测试：`python -m unittest discover -s dev/table_demo -p "test_*.py"`
+运行测试：`python -m unittest discover -s table -p "test_*.py"`

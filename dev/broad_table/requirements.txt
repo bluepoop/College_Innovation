@@ -1,0 +1,6 @@
+-r ../../table/requirements.txt
+Pillow>=10,<13
+ultralytics>=8.4,<9
+opencv-python>=4.8,<5
+numpy>=1.24,<3
+matplotlib>=3.7,<4

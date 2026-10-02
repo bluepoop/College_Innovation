@@ -5,4 +5,8 @@ chemDb/client/build/
 chemDb/client/dist/
 dev/table_demo/build/
 dev/table_demo/dist/
+table/build/
+table/dist/
+dev/broad_table/build/
+dev/broad_table/dist/
 chemDb/client/chemdb_demo_key

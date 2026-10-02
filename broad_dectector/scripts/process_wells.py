@@ -375,7 +375,8 @@ class WellProcessor:
         """处理单张图片，返回所有孔洞的颜色数据"""
         print(f"处理图片: {image_path}")
 
-        image = cv2.imread(str(image_path))
+        # imdecode supports Windows paths containing Chinese characters.
+        image = cv2.imdecode(np.fromfile(str(image_path), dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             print(f"错误：无法读取图片 {image_path}")
             return None
